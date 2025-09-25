@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Economic Indicators — FRED Charts</title>
+
+  <!-- Chart.js + date adapter (date-fns) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      margin: 0; padding: 16px; line-height: 1.45;
+      background: Canvas; color: CanvasText;
+    }
+    header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 10px; }
+    h1 { font-size: 1.25rem; margin: 0 8px 0 0; font-weight: 600; }
+    .hint { font-size: .9rem; opacity: .8; }
+    .controls { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+    input[type="password"], input[type="text"] {
+      padding: 8px 10px; border: 1px solid color-mix(in oklab, CanvasText 20%, Canvas 80%);
+      border-radius: 10px; background: Canvas; color: CanvasText; min-width: 260px;
+    }
+    button {
+      padding: 8px 12px; border: 1px solid transparent; border-radius: 10px; cursor: pointer;
+      background: color-mix(in oklab, CanvasText 10%, Canvas 90%); color: CanvasText;
+    }
+    button:hover { background: color-mix(in oklab, CanvasText 15%, Canvas 85%); }
+    .grid {
+      display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 12px;
+    }
+    @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+    .card {
+      border: 1px solid color-mix(in oklab, CanvasText 10%, Canvas 90%);
+      border-radius: 14px; padding: 12px; background: Canvas;
+      box-shadow: 0 1px 6px color-mix(in oklab, CanvasText 8%, transparent);
+    }
+    .card h2 { margin: 0 0 8px 4px; font-size: 1rem; font-weight: 600; }
+    canvas { width: 100%; height: 340px; }
+    footer { margin-top: 12px; font-size: .85rem; opacity: .75; }
+    .err { color: #b00020; font-weight: 600; }
+    .legend-note { font-size: .85rem; opacity: .8; margin: 4px 0 0 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Economic Indicators — FRED</h1>
+    <div class="hint">Last 10 years visible. Median is trailing 10-year rolling.</div>
+    <div class="controls">
+      <input id="apiKey" type="password" placeholder="e8c5d1a5ac7cd1defb7ea0ab2b960767" />
+      <button id="saveKeyBtn" title="Store your key in this browser only">Save key</button>
+      <button id="refreshBtn">Refresh</button>
+    </div>
+  </header>
+
+  <div id="status" class="hint"></div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>ICE BofA US High Yield Spread (BAMLH0A0HYM2)</h2>
+      <div class="legend-note">Line = series; Dashed = trailing 10-year median</div>
+      <canvas id="chartHY"></canvas>
+    </section>
+
+    <section class="card">
+      <h2>10y – 1y Treasury Yield (DGS10 − DGS1)</h2>
+      <div class="legend-note">Computed daily from FRED; dashed = trailing 10-year median</div>
+      <canvas id="chartSlope"></canvas>
+    </section>
+
+    <section class="card">
+      <h2>10-Year TIPS Yield (DFII10)</h2>
+      <div class="legend-note">Investment basis (inflation-indexed); dashed = trailing 10-year median</div>
+      <canvas id="chartTIPS"></canvas>
+    </section>
+  </div>
+
+  <footer>
+    Sources: St. Louis Fed (FRED). Data shown with 2-decimal formatting. Time axis uses business days if applicable.
+  </footer>
+
+<script>
+/* ========= BASIC CONFIG ========= */
+const SERIES = {
+  HY:   { id: 'BAMLH0A0HYM2',  name: 'HY Spread' },
+  D10:  { id: 'DGS10',         name: '10Y' },
+  D1:   { id: 'DGS1',          name: '1Y'  },
+  TIPS: { id: 'DFII10',        name: '10Y TIPS' }
+};
+
+// Last 10 years visible, but fetch 20 to compute trailing 10y medians
+const YEARS_TO_SHOW = 10;
+const YEARS_TO_FETCH = 20;
+
+// FRED parameters (daily where available)
+const FRED_BASE = 'https://api.stlouisfed.org/fred/series/observations';
+const FREQ = 'd';
+const FILE_TYPE = 'json';
+
+// Load saved key if present
+const apiInput = document.getElementById('apiKey');
+apiInput.value = localStorage.getItem('fred_api_key') || '';
+document.getElementById('saveKeyBtn').addEventListener('click', () => {
+  localStorage.setItem('fred_api_key', apiInput.value.trim());
+  toast('API key saved in this browser.');
+});
+document.getElementById('refreshBtn').addEventListener('click', () => bootstrap(true));
+
+const statusEl = document.getElementById('status');
+function setStatus(msg, isError=false) {
+  statusEl.innerHTML = isError ? ('<span class="err">' + msg + '</span>') : msg;
+}
+function toast(msg){ setStatus(msg); setTimeout(()=> setStatus(''), 2200); }
+
+/* ========= UTILITIES ========= */
+function fmt2(x){ return (x == null || Number.isNaN(x)) ? '' : Number(x).toFixed(2); }
+function dateMinusYears(d, years){
+  const dd = new Date(d);
+  dd.setFullYear(dd.getFullYear() - years);
+  return dd;
+}
+function iso(date){ return date.toISOString().slice(0,10); }
+
+const today = new Date();
+const fetchStart = iso(dateMinusYears(today, YEARS_TO_FETCH));
+const showStart  = iso(dateMinusYears(today, YEARS_TO_SHOW));
+
+/* ========= WEB WORKER (rolling 10y median) =========
+   We build a worker from a Blob so we stay single-file.
+*/
+const workerSrc = `
+  self.onmessage = (e) => {
+    const { series, windowYears } = e.data; // series: [{t: ms, v: number}, ...] sorted by time
+    const MS_PER_YEAR = 365.25 * 24 * 3600 * 1000;
+    const medians = new Array(series.length).fill(null);
+    let startIdx = 0;
+
+    function medianOf(arr){
+      if (!arr.length) return null;
+      const a = arr.slice().sort((x,y)=>x-y);
+      const mid = Math.floor(a.length/2);
+      return (a.length % 2) ? a[mid] : (a[mid-1] + a[mid]) / 2;
+    }
+
+    for (let i=0; i<series.length; i++){
+      const t = series[i].t;
+      const cutoff = t - windowYears * MS_PER_YEAR;
+
+      // Move startIdx to maintain time window [cutoff, t]
+      while (startIdx < i && series[startIdx].t < cutoff) startIdx++;
+
+      // Gather window values (inclusive up to i)
+      const windowVals = [];
+      for (let k=startIdx; k<=i; k++) {
+        const val = series[k].v;
+        if (val != null && !Number.isNaN(val)) windowVals.push(val);
+      }
+
+      medians[i] = medianOf(windowVals);
+    }
+
+    self.postMessage({ medians });
+  };
+`;
+const workerURL = URL.createObjectURL(new Blob([workerSrc], {type: 'text/javascript'}));
+
+/* ========= FETCH HELPERS ========= */
+async function fredFetch(seriesId, apiKey){
+  const url = new URL(FRED_BASE);
+  url.searchParams.set('series_id', seriesId);
+  url.searchParams.set('api_key', apiKey);
+  url.searchParams.set('file_type', FILE_TYPE);
+  url.searchParams.set('observation_start', fetchStart);
+  url.searchParams.set('frequency', FREQ);
+  // Note: no aggregation method; we want native daily where available
+
+  const resp = await fetch(url.toString(), { cache: 'no-store' });
+  if (!resp.ok) throw new Error(\`FRED request failed (\${seriesId}): \${resp.status}\`);
+  const data = await resp.json();
+  if (!data?.observations) throw new Error(\`No observations for \${seriesId}\`);
+  // Map to {t (ms), v (number or null), d (iso)}
+  return data.observations.map(o => {
+    const v = (o.value === "." ? null : Number(o.value));
+    return { t: new Date(o.date).getTime(), v, d: o.date };
+  }).filter(pt => !Number.isNaN(pt.t));
+}
+
+// Join two series by date (ISO), compute a-b
+function joinAndDiff(a, b){
+  const mapB = new Map(b.map(x => [x.d, x]));
+  const out = [];
+  for (const x of a){
+    const y = mapB.get(x.d);
+    if (!y) continue;
+    if (x.v == null || y.v == null) continue;
+    out.push({ t: x.t, d: x.d, v: x.v - y.v });
+  }
+  return out;
+}
+
+// Filter to last N years visible window for chart display
+function filterShowWindow(arr){
+  const minMs = new Date(showStart).getTime();
+  return arr.filter(p => p.t >= minMs);
+}
+
+/* ========= CHART FACTORY ========= */
+function makeChart(ctx, label){
+  return new Chart(ctx, {
+    type: 'line',
+    data: { datasets: [
+      {
+        label,
+        data: [],
+        parsing: false,
+        borderWidth: 2,
+        pointRadius: 0,
+      },
+      {
+        label: 'Trailing 10y Median',
+        data: [],
+        parsing: false,
+        borderWidth: 2,
+        pointRadius: 0,
+        borderDash: [6, 6],
+      }
+    ]},
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'nearest', intersect: false },
+      plugins: {
+        legend: { position: 'top' },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.parsed.y;
+              return \`\${ctx.dataset.label}: \${fmt2(v)}\`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'time',
+          time: { unit: 'year' },
+          ticks: { maxRotation: 0, autoSkip: true },
+          min: new Date(showStart).getTime(),
+          max: new Date().getTime()
+        },
+        y: {
+          ticks: {
+            callback: (v) => fmt2(v)
+          }
+        }
+      }
+    }
+  });
+}
+
+/* ========= MAIN BOOTSTRAP ========= */
+let charts = null;
+
+async function bootstrap(isRefresh=false){
+  try{
+    const apiKey = (apiInput.value || '').trim();
+    if (!apiKey) {
+      setStatus('Enter your FRED API key, then click Save key and Refresh.', true);
+      return;
+    }
+    setStatus(isRefresh ? 'Refreshing…' : 'Loading data…');
+
+    // Fetch raw series
+    const [hyRaw, d10Raw, d1Raw, tipsRaw] = await Promise.all([
+      fredFetch(SERIES.HY.id, apiKey),
+      fredFetch(SERIES.D10.id, apiKey),
+      fredFetch(SERIES.D1.id, apiKey),
+      fredFetch(SERIES.TIPS.id, apiKey),
+    ]);
+
+    // Compute slope (10y - 1y), align by date
+    const slopeRaw = joinAndDiff(d10Raw, d1Raw);
+
+    // For each of HY, slope, TIPS: compute trailing 10y median via worker
+    async function addMedian(rawSeries){
+      const worker = new Worker(workerURL);
+      const medPromise = new Promise((resolve, reject) => {
+        worker.onmessage = (e) => { worker.terminate(); resolve(e.data.medians); };
+        worker.onerror = (e) => { worker.terminate(); reject(e.message || 'Worker error'); };
+      });
+      worker.postMessage({ series: rawSeries, windowYears: 10 });
+      const medians = await medPromise;
+      // zip into [{t, v}, {t, vMedian}] and then filter to show window
+      const seriesShow = filterShowWindow(rawSeries);
+      const idxStart = rawSeries.findIndex(p => p.t === seriesShow[0]?.t);
+      const medShow = (idxStart >= 0)
+        ? medians.slice(idxStart, idxStart + seriesShow.length).map((m, i) => ({ x: seriesShow[i].t, y: m }))
+        : [];
+      const lineShow = seriesShow.map(p => ({ x: p.t, y: p.v }));
+      return { lineShow, medShow };
+    }
+
+    const [hy, slope, tips] = await Promise.all([
+      addMedian(hyRaw),
+      addMedian(slopeRaw),
+      addMedian(tipsRaw),
+    ]);
+
+    // Init charts once
+    if (!charts){
+      charts = {
+        hy:    makeChart(document.getElementById('chartHY'),    'HY Spread'),
+        slope: makeChart(document.getElementById('chartSlope'), '10y – 1y'),
+        tips:  makeChart(document.getElementById('chartTIPS'),  '10y TIPS'),
+      };
+    }
+
+    // Populate + redraw
+    function setDatasets(chart, pack){
+      chart.data.datasets[0].data = pack.lineShow;
+      chart.data.datasets[1].data = pack.medShow;
+      chart.update();
+    }
+    setDatasets(charts.hy, hy);
+    setDatasets(charts.slope, slope);
+    setDatasets(charts.tips, tips);
+
+    setStatus('Loaded. Tip: tap Refresh anytime.');
+  } catch (err){
+    console.error(err);
+    setStatus('Load Failed: ' + (err?.message || String(err)), true);
+  }
+}
+
+// Auto-run on first load
+window.addEventListener('DOMContentLoaded', () => {
+  if (!apiInput.value) {
+    setStatus('Enter your FRED API key and press Save key, then Refresh.');
+  } else {
+    bootstrap(false);
+  }
+});
+</script>
+</body>
+</html>
