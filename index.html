@@ -5,30 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Economic Indicators — FRED Charts</title>
 
-<noscript>
-  <div style="padding:12px;background:#ffe5e5;color:#900;border:1px solid #f99;border-radius:8px;margin:12px 0;">
-    This page needs JavaScript enabled. Please enable JS and reload.
-  </div>
-</noscript>
-
+<!-- Chart.js -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+<!-- Use Luxon date adapter (more dependable on iOS) -->
+<script src="https://cdn.jsdelivr.net/npm/luxon@3.5.0/build/global/luxon.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
 
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   body {
     font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-    margin: 0; padding: 16px; line-height: 1.45;
-    background: Canvas; color: CanvasText;
+    margin: 0; padding: 16px; line-height: 1.45; background: Canvas; color: CanvasText;
   }
   header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 10px; }
   h1 { font-size: 1.25rem; margin: 0 8px 0 0; font-weight: 600; }
   .hint { font-size: .9rem; opacity: .8; }
   .controls { margin-left: auto; display: flex; gap: 8px; align-items: center; }
   input[type="text"] {
-    padding: 8px 10px; border: 1px solid #ccc;
-    border-radius: 10px; background: Canvas; color: CanvasText; min-width: 260px;
+    padding: 8px 10px; border: 1px solid #ccc; border-radius: 10px; min-width: 260px;
+    background: Canvas; color: CanvasText;
   }
   button {
     padding: 8px 12px; border: 1px solid #ccc; border-radius: 10px; cursor: pointer;
@@ -37,16 +33,16 @@
   button:hover { background: rgba(127,127,127,.14); }
   .grid { display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 12px; }
   @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
-  .card {
-    border: 1px solid #ddd;
-    border-radius: 14px; padding: 12px; background: Canvas;
-    box-shadow: 0 1px 6px rgba(0,0,0,.08);
-  }
+  .card { border: 1px solid #ddd; border-radius: 14px; padding: 12px; background: Canvas;
+          box-shadow: 0 1px 6px rgba(0,0,0,.08); }
   .card h2 { margin: 0 0 8px 4px; font-size: 1rem; font-weight: 600; }
   canvas { width: 100%; height: 340px; }
   footer { margin-top: 12px; font-size: .85rem; opacity: .75; }
   .err { color: #b00020; font-weight: 600; }
   .legend-note { font-size: .85rem; opacity: .8; margin: 4px 0 0 6px; }
+  #log { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         font-size: 12px; white-space: pre-wrap; background: rgba(127,127,127,.08);
+         padding: 8px; border-radius: 8px; margin: 10px 0; max-height: 120px; overflow:auto; }
 </style>
 </head>
 <body>
@@ -54,14 +50,15 @@
   <h1>Economic Indicators — FRED</h1>
   <div class="hint">Last 10 years visible. Median is trailing 10-year rolling.</div>
   <div class="controls">
-    <input id="apiKey" type="text" placeholder="240c75e56610e9e1b96c402b2b779d2d" />
+    <input id="apiKey" type="text" placeholder="Enter your FRED API key" />
     <button id="saveKeyBtn" title="Store your key in this browser only">Save key</button>
     <button id="refreshBtn">Refresh</button>
+    <button id="testBtn" title="Draw a dummy chart to prove rendering works">Test chart</button>
   </div>
 </header>
 
 <div id="status" class="hint"></div>
-<div id="clickTest" class="hint" style="opacity:.75;margin:4px 0 10px 0;"></div>
+<div id="log" class="hint" aria-live="polite"></div>
 
 <div class="grid">
   <section class="card">
@@ -88,15 +85,19 @@
 </footer>
 
 <script>
-/* Sanity: prove buttons are wired */
-document.getElementById('saveKeyBtn').addEventListener('click', () => {
-  document.getElementById('clickTest').textContent = 'Save clicked ✓';
-});
-document.getElementById('refreshBtn').addEventListener('click', () => {
-  document.getElementById('clickTest').textContent = 'Refresh clicked ✓';
-});
+/* ---------- tiny on-page logger ---------- */
+const logEl = document.getElementById('log');
+function log(msg){ logEl.textContent += (msg + '\\n'); }
+window.onerror = (m, s, l, c, e)=>{ log('JS Error: '+m); };
+window.onunhandledrejection = (ev)=>{ log('Promise Rejection: '+(ev.reason?.message||ev.reason)); };
 
-/* ========= BASIC CONFIG ========= */
+/* ---------- storage that never throws (Safari private mode safe) ---------- */
+const safeStorage = (() => {
+  try { const t='__t__'; localStorage.setItem(t,'1'); localStorage.removeItem(t); return localStorage; }
+  catch { return { getItem:()=>'', setItem:()=>{}, removeItem:()=>{} }; }
+})();
+
+/* ---------- basic config ---------- */
 const SERIES = {
   HY:   { id: 'BAMLH0A0HYM2',  name: 'HY Spread' },
   D10:  { id: 'DGS10',         name: '10Y' },
@@ -108,12 +109,13 @@ const FRED_BASE = 'https://api.stlouisfed.org/fred/series/observations';
 const FREQ = 'd', FILE_TYPE = 'json';
 
 const apiInput = document.getElementById('apiKey');
-apiInput.value = localStorage.getItem('fred_api_key') || ''; // optional default
+apiInput.value = safeStorage.getItem('fred_api_key') || '';
 document.getElementById('saveKeyBtn').addEventListener('click', () => {
-  localStorage.setItem('fred_api_key', apiInput.value.trim());
+  safeStorage.setItem('fred_api_key', (apiInput.value||'').trim());
   toast('API key saved in this browser.');
 });
 document.getElementById('refreshBtn').addEventListener('click', () => bootstrap(true));
+document.getElementById('testBtn').addEventListener('click', drawTestChart);
 
 const statusEl = document.getElementById('status');
 function setStatus(msg, isError=false){ statusEl.innerHTML = isError ? ('<span class="err">'+msg+'</span>') : msg; }
@@ -125,36 +127,44 @@ const today = new Date();
 const fetchStart = iso(dateMinusYears(today, YEARS_TO_FETCH));
 const showStart  = iso(dateMinusYears(today, YEARS_TO_SHOW));
 
-/* ========= WEB WORKER ========= */
+/* ---------- worker (with fallback if blocked) ---------- */
 const workerSrc = `
-  self.onmessage = (e) => {
-    const { series, windowYears } = e.data;
-    const MS_PER_YEAR = 365.25 * 24 * 3600 * 1000;
-    const medians = new Array(series.length).fill(null);
-    let startIdx = 0;
-    function medianOf(arr){
-      if (!arr.length) return null;
-      const a = arr.slice().sort((x,y)=>x-y);
-      const mid = Math.floor(a.length/2);
-      return (a.length % 2) ? a[mid] : (a[mid-1] + a[mid]) / 2;
-    }
-    for (let i=0; i<series.length; i++){
-      const t = series[i].t;
-      const cutoff = t - windowYears * MS_PER_YEAR;
-      while (startIdx < i && series[startIdx].t < cutoff) startIdx++;
-      const windowVals = [];
-      for (let k=startIdx; k<=i; k++) {
-        const val = series[k].v;
-        if (val != null && !Number.isNaN(val)) windowVals.push(val);
-      }
-      medians[i] = medianOf(windowVals);
-    }
-    self.postMessage({ medians });
-  };
-`;
-const workerURL = URL.createObjectURL(new Blob([workerSrc], {type: 'text/javascript'}));
+self.onmessage = (e) => {
+  const { series, windowYears } = e.data;
+  const MSY = 365.25 * 864e5;
+  const med = new Array(series.length).fill(null);
+  let start = 0;
+  function medOf(a){ if(!a.length) return null; const s=a.slice().sort((x,y)=>x-y), m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; }
+  for (let i=0;i<series.length;i++){
+    const cutoff = series[i].t - windowYears*MSY;
+    while (start < i && series[start].t < cutoff) start++;
+    const vals = [];
+    for (let k=start;k<=i;k++){ const v=series[k].v; if(v!=null && !Number.isNaN(v)) vals.push(v); }
+    med[i] = medOf(vals);
+  }
+  self.postMessage({ medians: med });
+};`;
+let workerURL;
+try { workerURL = URL.createObjectURL(new Blob([workerSrc], {type:'text/javascript'})); }
+catch (e){ log('Worker Blob blocked; will compute medians on main thread.'); workerURL = null; }
 
-/* ========= FETCH ========= */
+function computeMediansSync(rawSeries, years=10){
+  // Same algorithm as worker, done synchronously if worker blocked.
+  const MSY = 365.25 * 864e5;
+  const med = new Array(rawSeries.length).fill(null);
+  let start = 0;
+  function medOf(a){ if(!a.length) return null; const s=a.slice().sort((x,y)=>x-y), m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; }
+  for (let i=0;i<rawSeries.length;i++){
+    const cutoff = rawSeries[i].t - years*MSY;
+    while (start < i && rawSeries[start].t < cutoff) start++;
+    const vals = [];
+    for (let k=start;k<=i;k++){ const v=rawSeries[k].v; if(v!=null && !Number.isNaN(v)) vals.push(v); }
+    med[i] = medOf(vals);
+  }
+  return med;
+}
+
+/* ---------- fetch helpers ---------- */
 async function fredFetch(seriesId, apiKey){
   const url = new URL(FRED_BASE);
   url.searchParams.set('series_id', seriesId);
@@ -166,21 +176,22 @@ async function fredFetch(seriesId, apiKey){
 
   let resp;
   try { resp = await fetch(url.toString(), { cache: 'no-store' }); }
-  catch (netErr) { throw new Error(\`Network error calling FRED for \${seriesId}: \${netErr?.message || netErr}\`); }
-  if (!resp.ok) throw new Error(\`FRED \${seriesId} HTTP \${resp.status} \${resp.statusText}\`);
+  catch (netErr) { throw new Error(`Network error calling FRED for ${seriesId}: ${netErr?.message || netErr}`); }
+  if (!resp.ok) throw new Error(`FRED ${seriesId} HTTP ${resp.status} ${resp.statusText}`);
 
   let data;
   try { data = await resp.json(); }
-  catch (parseErr) { throw new Error(\`Could not parse JSON for \${seriesId}: \${parseErr?.message || parseErr}\`); }
+  catch (parseErr) { throw new Error(`Could not parse JSON for ${seriesId}: ${parseErr?.message || parseErr}`); }
 
-  if (!data || !Array.isArray(data.observations)) throw new Error(\`Unexpected FRED response for \${seriesId}: missing observations\`);
+  if (!data || !Array.isArray(data.observations)) throw new Error(`Unexpected FRED response for ${seriesId}: missing observations`);
 
   const out = data.observations.map(o => {
     const v = (o.value === "." ? null : Number(o.value));
     return { t: new Date(o.date).getTime(), v, d: o.date };
   }).filter(pt => !Number.isNaN(pt.t));
 
-  if (out.length === 0) throw new Error(\`FRED returned 0 rows for \${seriesId} (check API key and parameters)\`);
+  if (out.length === 0) throw new Error(`FRED returned 0 rows for ${seriesId} (check API key and parameters)`);
+  log(`Fetched ${seriesId}: ${out.length} rows`);
   return out;
 }
 function joinAndDiff(a, b){
@@ -199,7 +210,7 @@ function filterShowWindow(arr){
   return arr.filter(p => p.t >= minMs);
 }
 
-/* ========= CHARTS ========= */
+/* ---------- chart factory ---------- */
 function makeChart(ctx, label){
   return new Chart(ctx, {
     type: 'line',
@@ -210,39 +221,58 @@ function makeChart(ctx, label){
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       interaction: { mode: 'nearest', intersect: false },
-      plugins: { legend: { position: 'top' },
-        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${fmt2(ctx.parsed.y)}` } } },
+      plugins: {
+        legend: { position: 'top' },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${fmt2(ctx.parsed.y)}` } }
+      },
       scales: {
-        x: { type: 'time', time: { unit: 'year' }, ticks: { maxRotation: 0, autoSkip: true },
-             min: new Date(showStart).getTime(), max: new Date().getTime() },
+        x: {
+          type: 'time',
+          time: { unit: 'year' },
+          ticks: { maxRotation: 0, autoSkip: true },
+          min: new Date(showStart).getTime(),
+          max: new Date().getTime()
+        },
         y: { ticks: { callback: (v) => fmt2(v) } }
       }
     }
   });
 }
 
-/* ========= MAIN ========= */
+/* ---------- main ---------- */
 let charts = null;
+
 async function bootstrap(isRefresh=false){
   try{
     const apiKey = (apiInput.value || '').trim();
-    if (!apiKey){ setStatus('Enter your FRED API key, then press Save key and Refresh.', true); return; }
+    if (!apiKey){ setStatus('Enter your FRED API key, then Save key → Refresh.', true); return; }
     setStatus(isRefresh ? 'Refreshing…' : 'Loading data…');
 
+    if (!window.Chart) throw new Error('Chart.js failed to load');
+    // Fetch raw series in parallel
     const [hyRaw, d10Raw, d1Raw, tipsRaw] = await Promise.all([
-      fredFetch(SERIES.HY.id, apiKey), fredFetch(SERIES.D10.id, apiKey),
-      fredFetch(SERIES.D1.id, apiKey), fredFetch(SERIES.TIPS.id, apiKey),
+      fredFetch(SERIES.HY.id, apiKey),
+      fredFetch(SERIES.D10.id, apiKey),
+      fredFetch(SERIES.D1.id, apiKey),
+      fredFetch(SERIES.TIPS.id, apiKey),
     ]);
     const slopeRaw = joinAndDiff(d10Raw, d1Raw);
 
+    // rolling medians (worker or sync fallback)
     async function addMedian(rawSeries){
-      const worker = new Worker(workerURL);
-      const medPromise = new Promise((resolve, reject) => {
-        worker.onmessage = (e) => { worker.terminate(); resolve(e.data.medians); };
-        worker.onerror   = (e) => { worker.terminate(); reject(e.message || 'Worker error'); };
-      });
-      worker.postMessage({ series: rawSeries, windowYears: 10 });
-      const medians = await medPromise;
+      if (workerURL){
+        const worker = new Worker(workerURL);
+        const medPromise = new Promise((resolve, reject) => {
+          worker.onmessage = (e) => { worker.terminate(); resolve(e.data.medians); };
+          worker.onerror   = (e) => { worker.terminate(); reject(e.message || 'Worker error'); };
+        });
+        worker.postMessage({ series: rawSeries, windowYears: 10 });
+        var medians = await medPromise;
+        log('Median computed in worker.');
+      } else {
+        var medians = computeMediansSync(rawSeries, 10);
+        log('Median computed on main thread.');
+      }
       const seriesShow = filterShowWindow(rawSeries);
       const idxStart = rawSeries.findIndex(p => p.t === seriesShow[0]?.t);
       const medShow = (idxStart >= 0)
@@ -252,7 +282,11 @@ async function bootstrap(isRefresh=false){
       return { lineShow, medShow };
     }
 
-    const [hy, slope, tips] = await Promise.all([ addMedian(hyRaw), addMedian(slopeRaw), addMedian(tipsRaw) ]);
+    const [hy, slope, tips] = await Promise.all([
+      addMedian(hyRaw),
+      addMedian(slopeRaw),
+      addMedian(tipsRaw),
+    ]);
 
     if (!charts){
       charts = {
@@ -263,17 +297,42 @@ async function bootstrap(isRefresh=false){
     }
     function setDatasets(chart, pack){ chart.data.datasets[0].data = pack.lineShow; chart.data.datasets[1].data = pack.medShow; chart.update(); }
     setDatasets(charts.hy, hy); setDatasets(charts.slope, slope); setDatasets(charts.tips, tips);
+
     setStatus('Loaded. Tip: tap Refresh anytime.');
+    log('All charts rendered.');
   } catch (err){
     console.error(err);
     setStatus('Load Failed: ' + (err?.message || String(err)), true);
-    alert('Load Failed:\n' + (err?.message || String(err)));
+    log('Load Failed: ' + (err?.message || String(err)));
+    alert('Load Failed:\\n' + (err?.message || String(err)));
   }
 }
 
+/* ---------- dummy chart to prove rendering works ---------- */
+function drawTestChart(){
+  try{
+    const ctx = document.getElementById('chartHY').getContext('2d');
+    const t = Date.now(), day=864e5;
+    const pts = Array.from({length: 30}, (_,i)=>({x:t-(29-i)*day, y: Math.sin(i/4)*2 + 5}));
+    if (!charts?.hy){
+      charts = charts || {};
+      charts.hy = makeChart(ctx, 'Test Series');
+    }
+    charts.hy.data.datasets[0].data = pts;
+    charts.hy.data.datasets[1].data = pts.map(p=>({x:p.x, y:5}));
+    charts.hy.update();
+    setStatus('Test chart drawn (HY panel). Now click Refresh to load real data.');
+    log('Test chart drawn.');
+  } catch (e){
+    log('Test chart error: '+e.message);
+  }
+}
+
+/* ---------- boot ---------- */
 window.addEventListener('DOMContentLoaded', () => {
   if (!apiInput.value) setStatus('Enter your FRED API key and press Save key, then Refresh.');
   else bootstrap(false);
+  log('Page ready. Host: '+location.hostname);
 });
 </script>
 </body>
